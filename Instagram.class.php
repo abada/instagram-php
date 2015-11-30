@@ -4,6 +4,9 @@
 namespace jocks\libraries\instagram;
 use jocks\libraries\instagram\exceptions\InstagramException;
 
+// Require
+require_once __DIR__ . '/InstagramException.class.php';
+
 /**
  * Class Instagram
  *
@@ -58,26 +61,45 @@ class Instagram {
     /**
      * Access token of current session.
      *
-     * @var InstagramOAuthToken
+     * @var string
      */
     private $accessToken;
+
+    /**
+     * Instagram maximum rate limit for the application.
+     *
+     * @var int
+     */
+    private $ratelimit = 0;
+
+    /**
+     * Instagram rate limit remaining. (500/hour in Sandbox mode and 5000/hour in Live mode)
+     *
+     * @var int
+     */
+    private $ratelimitRemaining = 0;
 
     /**
      * Instagram constructor.
      *
      * @param string $apiKey
      * @param string $apiSecret
+     * @throws InstagramException
      */
     public function __construct($apiKey, $apiSecret) {
         $this->apiKey = $apiKey;
         $this->apiSecret = $apiSecret;
 
         // Autoload required files
-        spl_autoload_register(function($class) {
-            if(file_exists(($path = __DIR__ . '/' . basename($class . '.class.php')))) {
-                require_once realpath($path);
-            }
-        });
+        if(function_exists('spl_autoload_register')) {
+            spl_autoload_register(function($class) {
+                if(file_exists(($path = __DIR__ . '/' . basename(end(explode('\\', $class)) . '.class.php')))) {
+                    require_once realpath($path);
+                }
+            });
+        } else {
+            throw new InstagramException('Unable to initialize the class autoloader.');
+        }
     }
 
     /**
@@ -160,14 +182,13 @@ class Instagram {
         // Create authorization path
         if($authorizationNeeded === true && $this->accessToken === null)
             throw new InstagramException('You need a valid access token to run this request.');
-        $authorizationPath = ($authorizationNeeded === true) ? '?access_token=' . $this->accessToken->getAccessToken() : '?client_id=' . $this->getApiKey();
+        $authorizationPath = ($authorizationNeeded === true) ? '?access_token=' . $this->accessToken : '?client_id=' . $this->getApiKey();
 
         // Create api request
         $apiRequest = self::API_URI . $path . $authorizationPath;
 
         // Execute request
         $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, $apiRequest);
         curl_setopt($ch, CURLOPT_HTTPHEADER, array('Accept: application/json'));
         curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 20);
         curl_setopt($ch, CURLOPT_TIMEOUT, 90);
@@ -175,15 +196,97 @@ class Instagram {
         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
         curl_setopt($ch, CURLOPT_HEADER, true);
 
+        // Modify curl request for each method
+        switch($method) {
+
+            // Get method
+            case self::METHOD_GET:
+                curl_setopt($ch, CURLOPT_URL, $apiRequest . '&' . http_build_query($parameters));
+                break;
+
+            // Post method
+            case self::METHOD_POST:
+                $parameters['sig'] = $this->sign_header($path, $parameters);
+                curl_setopt($ch, CURLOPT_URL, $apiRequest);
+                curl_setopt($ch,CURLOPT_POST, count($parameters));
+                curl_setopt($ch,CURLOPT_POSTFIELDS, http_build_query($parameters));
+                break;
+
+        }
+
         // Get result of request
         if(($result = curl_exec($ch)) !== false) {
             list($headers, $json) = explode("\r\n\r\n", $result, 2);
+            $headers = $this->http_parse_headers($headers);
+            $json = json_decode($json);
+
+            // Set ratelimit
+            if(array_key_exists('X-Ratelimit-Limit', $headers)) $this->setRatelimit(intval($headers['X-Ratelimit-Limit']));
+            if(array_key_exists('X-Ratelimit-Remaining', $headers)) $this->setRatelimitRemaining(intval($headers['X-Ratelimit-Remaining']));
+
+            // Check for api error
+            if(isset($json->meta->error_message)) {
+                throw new InstagramException($json->meta->error_message, $json->meta->code);
+            }
+
+
+            // Return json
+            return $json;
+
         } else {
             throw new InstagramException('Request failed with a curl error (ERR: ' . curl_error($ch) . ')');
         }
 
-        // Return result
-        return json_decode($json);
+    }
+
+    /**
+     * Sign header for secured requests.
+     *
+     * @param $endpoint
+     * @param array $params
+     * @return string
+     */
+    private function sign_header($endpoint, array $params = array()) {
+        ksort($params);
+        foreach ($params as $key => $val)
+            $endpoint .= '|' . $key . '=' . $val;
+        return hash_hmac('sha256', $endpoint, $this->getApiSecret(), false);
+    }
+
+    /**
+     * Parse http header. Except of the default perl function.
+     *
+     * @param $raw_headers
+     * @return array
+     */
+    private function http_parse_headers($raw_headers) {
+        $headers = array();
+        $key = '';
+
+        foreach(explode("\n", $raw_headers) as $i => $h) {
+            $h = explode(':', $h, 2);
+
+            if (isset($h[1])) {
+                if (!isset($headers[$h[0]])) {
+                    $headers[$h[0]] = trim($h[1]);
+                } else if (is_array($headers[$h[0]])) {
+                    $headers[$h[0]] = array_merge($headers[$h[0]], array(trim($h[1])));
+                } else {
+                    $headers[$h[0]] = array_merge(array($headers[$h[0]]), array(trim($h[1])));
+                }
+
+                $key = $h[0];
+            } else {
+                if (substr($h[0], 0, 1) == "\t") {
+                    $headers[$key] .= "\r\n\t" . trim($h[0]);
+                } else if(!$key) {
+                    $headers[0] = trim($h[0]);
+                    trim($h[0]);
+                }
+            }
+        }
+
+        return $headers;
     }
 
     /**
@@ -223,9 +326,45 @@ class Instagram {
     }
 
     /**
+     * Get the maximum instagram rate limit.
+     *
+     * @return int
+     */
+    public function getRatelimit() {
+        return $this->ratelimit;
+    }
+
+    /**
+     * Set the maximum rate limit.
+     *
+     * @param int $ratelimit
+     */
+    public function setRatelimit($ratelimit) {
+        $this->ratelimit = $ratelimit;
+    }
+
+    /**
+     * Get the remaining rate limit.
+     *
+     * @return int
+     */
+    public function getRatelimitRemaining() {
+        return $this->ratelimitRemaining;
+    }
+
+    /**
+     * Set the remaining rate limit.
+     *
+     * @param int $ratelimitRemaining
+     */
+    public function setRatelimitRemaining($ratelimitRemaining) {
+        $this->ratelimitRemaining = $ratelimitRemaining;
+    }
+
+    /**
      * Get instagram access token of current session.
      *
-     * @return InstagramOAuthToken
+     * @return string
      */
     public function getAccessToken() {
         return $this->accessToken;
@@ -234,10 +373,14 @@ class Instagram {
     /**
      * Set instagram access token of current session.
      *
-     * @param InstagramOAuthToken $accessToken
+     * @param InstagramOAuthToken|string $accessToken
      */
     public function setAccessToken($accessToken) {
-        $this->accessToken = $accessToken;
+        if($accessToken instanceof InstagramOAuthToken) {
+            $this->accessToken = $accessToken->getAccessToken();
+        } else {
+            $this->accessToken = $accessToken;
+        }
     }
 
     /**
@@ -250,6 +393,14 @@ class Instagram {
         return $this->getUser('self');
     }
 
+    /**
+     * Get my current media feed.
+     *
+     * @param null $limit
+     * @param null $minId
+     * @param null $maxId
+     * @return array
+     */
     public function getMyFeed($limit = null, $minId = null, $maxId = null) {
         return $this->getUserFeed('self', $limit, $minId, $maxId);
     }
@@ -277,7 +428,7 @@ class Instagram {
     }
 
     /**
-     * getUserFeed
+     * Get users media feed.
      *
      * @param $userId
      * @param null $limit
@@ -296,52 +447,96 @@ class Instagram {
         $media = array();
         foreach($request->data as $mediaData) {
             switch($mediaData->type) {
+
                 case 'image':
                     $media[] = new InstagramPhoto(
-                        $mediaData->id,
-                        $mediaData->comments->count,
-                        $mediaData->likes->count,
-                        new InstagramCaption($mediaData->caption->id, $mediaData->caption->username, $mediaData->caption->full_name, $mediaData->caption->type),
-                        $mediaData->link,
-                        $mediaData->created_time,
-                        new InstagramMediaPreview($mediaData->images->thumbnail->url, $mediaData->images->thumbnail->width, $mediaData->images->thumbnail->height),
-                        new InstagramMediaPreview($mediaData->images->low_resolution->url, $mediaData->images->low_resolution->width, $mediaData->images->low_resolution->height),
-                        new InstagramMediaPreview($mediaData->images->standard_resolution->url, $mediaData->images->standard_resolution->width, $mediaData->images->standard_resolution->height),
-                        new InstagramUserCollection($mediaData->users_in_photo),
-                        $mediaData->filter,
-                        (isset($mediaData->location)) ? new InstagramLocation(
+                        ((isset($mediaData->id)) ? $mediaData->id : null),
+                        ((isset($mediaData->comments->count)) ? $mediaData->comments->count : null),
+                        ((isset($mediaData->likes->count)) ? $mediaData->likes->count : null),
+                        new InstagramCaption(
+                            ((isset($mediaData->caption->id)) ? $mediaData->caption->id : null),
+                            ((isset($mediaData->caption->username)) ? $mediaData->caption->username : null),
+                            ((isset($mediaData->caption->full_name)) ? $mediaData->caption->full_name : null),
+                            ((isset($mediaData->caption->type)) ? $mediaData->caption->type : null)
+                        ),
+                        ((isset($mediaData->link)) ? $mediaData->link : null),
+                        ((isset($mediaData->created_time)) ? $mediaData->created_time : null),
+                        new InstagramMediaPreview(
+                            ((isset($mediaData->images->thumbnail->url)) ? $mediaData->images->thumbnail->url : null),
+                            ((isset($mediaData->images->thumbnail->width)) ? $mediaData->images->thumbnail->width : null),
+                            ((isset($mediaData->images->thumbnail->height)) ? $mediaData->images->thumbnail->height : null)
+                        ),
+                        new InstagramMediaPreview(
+                            ((isset($mediaData->images->low_resolution->url)) ? $mediaData->images->low_resolution->url : null),
+                            ((isset($mediaData->images->low_resolution->width)) ? $mediaData->images->low_resolution->width : null),
+                            ((isset($mediaData->images->low_resolution->height)) ? $mediaData->images->low_resolution->height : null)
+                        ),
+                        new InstagramMediaPreview(
+                            ((isset($mediaData->images->standard_resolution->url)) ? $mediaData->images->standard_resolution->url : null),
+                            ((isset($mediaData->images->standard_resolution->width)) ? $mediaData->images->standard_resolution->width : null),
+                            ((isset($mediaData->images->standard_resolution->height)) ? $mediaData->images->standard_resolution->height : null)
+                        ),
+                        new InstagramUserCollection((isset($mediaData->users_in_photo)) ? $mediaData->users_in_photo : null),
+                        ((isset($mediaData->filter)) ? $mediaData->filter : null),
+                        ((isset($mediaData->location)) ? new InstagramLocation(
                             (isset($mediaData->location->id)) ? $mediaData->location->id : null,
                             (isset($mediaData->location->latitude)) ? $mediaData->location->latitude : null,
                             (isset($mediaData->location->longitude)) ? $mediaData->location->longitude : null,
                             (isset($mediaData->location->street_address)) ? $mediaData->location->street_address : null,
                             (isset($mediaData->location->name)) ? $mediaData->location->name : null
-                        ) : new InstagramLocation(),
-                        $mediaData->tags
+                        ) : new InstagramLocation()),
+                        ((isset($mediaData->tags)) ? $mediaData->tags : null)
                     );
                     break;
+
                 case 'video':
                     $media[] = new InstagramVideo(
-                        $mediaData->id,
-                        $mediaData->comments->count,
-                        $mediaData->likes->count,
-                        new InstagramCaption($mediaData->caption->id, $mediaData->caption->username, $mediaData->caption->full_name, $mediaData->caption->type),
-                        $mediaData->link,
-                        $mediaData->created_time,
-                        new InstagramMediaPreview($mediaData->images->thumbnail->url, $mediaData->images->thumbnail->width, $mediaData->images->thumbnail->height),
-                        new InstagramMediaPreview($mediaData->images->low_resolution->url, $mediaData->images->low_resolution->width, $mediaData->images->low_resolution->height),
-                        new InstagramMediaPreview($mediaData->images->standard_resolution->url, $mediaData->images->standard_resolution->width, $mediaData->images->standard_resolution->height),
-                        new InstagramUserCollection($mediaData->users_in_photo),
-                        $mediaData->filter,
-                        (isset($mediaData->location)) ? new InstagramLocation(
+                        ((isset($mediaData->id)) ? $mediaData->id : null),
+                        ((isset($mediaData->comments->count)) ? $mediaData->comments->count : null),
+                        ((isset($mediaData->likes->count)) ? $mediaData->likes->count : null),
+                        new InstagramCaption(
+                            ((isset($mediaData->caption->id)) ? $mediaData->caption->id : null),
+                            ((isset($mediaData->caption->username)) ? $mediaData->caption->username : null),
+                            ((isset($mediaData->caption->full_name)) ? $mediaData->caption->full_name : null),
+                            ((isset($mediaData->caption->type)) ? $mediaData->caption->type : null)
+                        ),
+                        ((isset($mediaData->link)) ? $mediaData->link : null),
+                        ((isset($mediaData->created_time)) ? $mediaData->created_time : null),
+                        new InstagramMediaPreview(
+                            ((isset($mediaData->images->thumbnail->url)) ? $mediaData->images->thumbnail->url : null),
+                            ((isset($mediaData->images->thumbnail->width)) ? $mediaData->images->thumbnail->width : null),
+                            ((isset($mediaData->images->thumbnail->height)) ? $mediaData->images->thumbnail->height : null)
+                        ),
+                        new InstagramMediaPreview(
+                            ((isset($mediaData->images->low_resolution->url)) ? $mediaData->images->low_resolution->url : null),
+                            ((isset($mediaData->images->low_resolution->width)) ? $mediaData->images->low_resolution->width : null),
+                            ((isset($mediaData->images->low_resolution->height)) ? $mediaData->images->low_resolution->height : null)
+                        ),
+                        new InstagramMediaPreview(
+                            ((isset($mediaData->images->standard_resolution->url)) ? $mediaData->images->standard_resolution->url : null),
+                            ((isset($mediaData->images->standard_resolution->width)) ? $mediaData->images->standard_resolution->width : null),
+                            ((isset($mediaData->images->standard_resolution->height)) ? $mediaData->images->standard_resolution->height : null)
+                        ),
+                        new InstagramUserCollection((isset($mediaData->users_in_photo)) ? $mediaData->users_in_photo : null),
+                        ((isset($mediaData->filter)) ? $mediaData->filter : null),
+                        ((isset($mediaData->location)) ? new InstagramLocation(
                             (isset($mediaData->location->id)) ? $mediaData->location->id : null,
                             (isset($mediaData->location->latitude)) ? $mediaData->location->latitude : null,
                             (isset($mediaData->location->longitude)) ? $mediaData->location->longitude : null,
                             (isset($mediaData->location->street_address)) ? $mediaData->location->street_address : null,
                             (isset($mediaData->location->name)) ? $mediaData->location->name : null
-                        ) : new InstagramLocation(),
-                        $mediaData->tags,
-                        new InstagramMediaPreview($mediaData->videos->low_resolution->url, $mediaData->videos->low_resolution->width, $mediaData->videos->low_resolution->height),
-                        new InstagramMediaPreview($mediaData->videos->standard_resolution->url, $mediaData->videos->standard_resolution->width, $mediaData->videos->standard_resolution->height)
+                        ) : new InstagramLocation()),
+                        ((isset($mediaData->tags)) ? $mediaData->tags : null),
+                        new InstagramMediaPreview(
+                            ((isset($mediaData->videos->low_resolution->url)) ? $mediaData->videos->low_resolution->url : null),
+                            ((isset($mediaData->videos->low_resolution->width)) ? $mediaData->videos->low_resolution->width : null),
+                            ((isset($mediaData->videos->low_resolution->height)) ? $mediaData->videos->low_resolution->height : null)
+                        ),
+                        new InstagramMediaPreview(
+                            ((isset($mediaData->videos->standard_resolution->url)) ? $mediaData->videos->standard_resolution->url : null),
+                            ((isset($mediaData->videos->standard_resolution->width)) ? $mediaData->videos->standard_resolution->width : null),
+                            ((isset($mediaData->videos->standard_resolution->height)) ? $mediaData->videos->standard_resolution->height : null)
+                        )
                     );
                     break;
             }

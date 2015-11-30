@@ -19,22 +19,26 @@ $appPermissions = array('basic', 'public_content', 'follower_list', 'comments', 
     :: likes - to like and unlike media on a user's behalf
  */
 
-// Init instagram instance
-$instagram = new Instagram($apiKey, $apiSecret);
-echo '<a href="' . $instagram->getLoginUrl($apiCallback, $appPermissions) . '">Login with instagram</a><br /><br /><br />';
+try {
 
-// Proceed the returning request
-if(array_key_exists('code', $_GET)) {
-    try {
+    // Init instagram instance
+    $instagram = new Instagram($apiKey, $apiSecret);
+    echo '<a href="' . $instagram->getLoginUrl($apiCallback, $appPermissions) . '">Login with instagram</a><br /><br /><br />';
+
+    if(array_key_exists('code', $_GET)) {
         $apiToken = $instagram->getToken($apiCallback, $_GET['code']);
-        $instagram->setAccessToken($apiToken);
-
-        $myAccount = $instagram->getMe();
-        $myFeed = $instagram->getMyFeed();
-        $someonesFeed = $instagram->getUserFeed(21183801);
+        var_dump($apiToken);
+        header('Location: ' . $apiCallback . '?access=' . $apiToken->getAccessToken());
+        exit();
+    } else if(array_key_exists('access', $_GET)) {
+        $instagram->setAccessToken($_GET['access']);
+        
+        $someonesFeed = $instagram->getUserFeed(25025320);
         var_dump($someonesFeed);
-
-    } catch(InstagramException $ex) {
-        die('<strong>Error:</strong> <i>' . $ex->getMessage() . '</i>');
     }
+
+    echo '<br /><br /><br /><i>Rate remaining ' . $instagram->getRatelimitRemaining() . '/' . $instagram->getRatelimit() . '</i>';
+
+} catch(InstagramException $ex) {
+    die('<strong>Error:</strong> <i>' . $ex->getMessage() . '</i> (Rate remaining ' . $instagram->getRatelimitRemaining() . '/' . $instagram->getRatelimit() . ')');
 }
