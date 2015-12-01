@@ -25,16 +25,18 @@ try {
     $instagram = new Instagram($apiKey, $apiSecret);
     echo '<a href="' . $instagram->getLoginUrl($apiCallback, $appPermissions) . '">Login with instagram</a><br /><br /><br />';
 
-    if(array_key_exists('code', $_GET)) {
+    if(array_key_exists('error_description', $_GET)) {
+        throw new InstagramException($_GET['error_description']);
+
+    } else if(array_key_exists('code', $_GET)) {
         $apiToken = $instagram->getToken($apiCallback, $_GET['code']);
-        var_dump($apiToken);
         header('Location: ' . $apiCallback . '?access=' . $apiToken->getAccessToken());
         exit();
+
     } else if(array_key_exists('access', $_GET)) {
         $instagram->setAccessToken($_GET['access']);
-        
-        $someonesFeed = $instagram->getUserFeed(25025320);
-        var_dump($someonesFeed);
+        $myLikes = $instagram->getMyLikes();
+        var_dump($myLikes);
     }
 
     echo '<br /><br /><br /><i>Rate remaining ' . $instagram->getRatelimitRemaining() . '/' . $instagram->getRatelimit() . '</i>';

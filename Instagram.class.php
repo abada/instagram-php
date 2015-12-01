@@ -400,13 +400,31 @@ class Instagram {
      * @param null $minId
      * @param null $maxId
      * @return array
+     * @throws InstagramException
      */
     public function getMyFeed($limit = null, $minId = null, $maxId = null) {
         return $this->getUserFeed('self', $limit, $minId, $maxId);
     }
 
     /**
-     * Get currently logged in users profile
+     * Get my liked media.
+     *
+     * @param null $limit
+     * @param null $maxId
+     * @return array
+     * @throws InstagramException
+     */
+    public function getMyLikes($limit = null, $maxId = null) {
+        $request = $this->apiRequest('/users/self/media/liked/', true, array(
+            'count' => $limit,
+            'max_like_id' => $maxId
+        ));
+
+        return $this->parseMedia($request->data);
+    }
+
+    /**
+     * Get currently logged in users profile.
      *
      * @param int|string $userId
      * @return InstagramUser
@@ -444,8 +462,19 @@ class Instagram {
             'max_id' => $maxId
         ));
 
+        return $this->parseMedia($request->data);
+    }
+
+    /**
+     * Parse requested data to objectives.
+     *
+     * @param array $data
+     * @return array
+     */
+    private function parseMedia(array $data) {
         $media = array();
-        foreach($request->data as $mediaData) {
+
+        foreach($data as $mediaData) {
             switch($mediaData->type) {
 
                 case 'image':
@@ -542,8 +571,21 @@ class Instagram {
             }
         }
 
-        // Return media
         return $media;
+    }
+
+    /**
+     * Get someones user id by username
+     *
+     * @param $username
+     * @return int
+     * @throws InstagramException
+     */
+    public function getUserId($username) {
+        $request = $this->apiRequest('/users/search/', true, array('count' => 1, 'q' => $username));
+        if(count($request->data) === 0)
+            throw new InstagramException('User does not exists.');
+        return intval($request->data[0]->id);
     }
 
 }
